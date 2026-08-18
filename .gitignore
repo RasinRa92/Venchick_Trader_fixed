@@ -1,10 +1,229 @@
+# ============================================================
+# SECRETS / ENVIRONMENT
+# ============================================================
+
 .env
 .env.*
 !.env.example
+
+# Local secret/config files
+*.secret
+*.secrets
+secrets/
+private/
+credentials/
+credentials.json
+secrets.json
+
+
+# ============================================================
+# PYTHON
+# ============================================================
+
 __pycache__/
-*.pyc
-*.log
-logs/
+*.py[cod]
+*$py.class
+
 .venv/
 venv/
 env/
+ENV/
+
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.tox/
+.nox/
+
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+
+# ============================================================
+# LOGS
+# ============================================================
+
+*.log
+logs/
+log/
+*.log.*
+audit_logs/
+debug_logs/
+
+
+# ============================================================
+# DATABASE / LOCAL DATA
+# ============================================================
+
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+
+database.db
+trading.db
+local.db
+
+# Local database backups
+*.sql
+*.dump
+*.bak
+
+
+# ============================================================
+# TRADING / GENERATED DATA
+# ============================================================
+
+data/
+cache/
+tmp/
+temp/
+
+# Generated market data
+market_data/
+historical_data/
+backtest_results/
+backtests/
+reports/
+
+# Generated charts
+charts/
+generated_charts/
+
+# Generated exports
+exports/
+
+
+# ============================================================
+# MT5 / BROKER LOCAL FILES
+# ============================================================
+
+# MT5 terminal/local files
+*.ex4
+*.ex5
+*.set
+*.ini
+
+# Do NOT commit terminal data directories
+terminal/
+MQL5/Logs/
+MQL5/Files/
+MQL5/Profiles/
+
+
+# ============================================================
+# DISCORD / BOT GENERATED FILES
+# ============================================================
+
+discord_logs/
+transcripts/
+ticket_transcripts/
+
+# Generated bot state
+bot_state.json
+runtime_state.json
+
+
+# ============================================================
+# IDE / EDITORS
+# ============================================================
+
+.vscode/
+.idea/
+*.code-workspace
+
+# VS Code local history
+.history/
+
+# Zed
+.zed/
+
+
+# ============================================================
+# OPERATING SYSTEM
+# ============================================================
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Linux
+*~
+
+
+# ============================================================
+# TEMPORARY / BACKUP FILES
+# ============================================================
+
+*.tmp
+*.temp
+*.swp
+*.swo
+*.bak
+*.backup
+*.old
+*.orig
+
+*.zip
+*.7z
+*.rar
+
+
+# ============================================================
+# BUILD / DISTRIBUTION
+# ============================================================
+
+build/
+dist/
+*.egg-info/
+.eggs/
+
+pip-wheel-metadata/
+
+
+# ============================================================
+# NODE / JAVASCRIPT
+# ============================================================
+
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+.npm/
+.yarn/
+.pnpm-store/
+
+
+# ============================================================
+# TEST ARTIFACTS
+# ============================================================
+
+.pytest_cache/
+.tox/
+.nox/
+test-results/
+test-output/
+coverage/
+htmlcov/
+
+
+# ============================================================
+# LOCAL MACHINE CONFIG
+# ============================================================
+
+local/
+.local/
+machine/
+machine_config/
