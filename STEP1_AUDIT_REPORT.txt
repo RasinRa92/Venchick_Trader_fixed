@@ -1,0 +1,1150 @@
+================================================================================
+VENCHICK TRADER — STEP 1 AUDIT REPORT
+Generated: 2026-08-19
+Auditor  : Zed AI (Claude Sonnet 4.6)
+================================================================================
+
+LEGEND
+------
+FOUND    = Directly confirmed by reading the code.
+INFERRED = Reasonably inferred from the code but not explicitly confirmed.
+MISSING  = Required functionality that could not be found.
+
+
+================================================================================
+A. EXECUTIVE SUMMARY
+================================================================================
+
+FOUND: Venchick Trader is a Discord-based SIGNAL NOTIFICATION BOT with an AI
+analyst chat layer. It connects to MetaTrader 5 exclusively for MARKET DATA
+(OHLCV, spreads, indicators), runs a multi-engine signal pipeline (structure →
+SMC → session → bias → second-opinion LLM), and broadcasts trade setup cards
+to Discord channels. It does NOT place, modify, or close any actual trades.
+
+The codebase is substantially complete as a signal + informational tool. Several
+key architectural components required by the stated target system are absent or
+incomplete, most critically: MT5 credential loading from environment variables,
+actual trade execution, multi-account support, per-user drawdown protection,
+and any form of testing. The project has been built in named "phases" (Phases
+1–10 referenced in docstrings), and the code quality is high overall — well-
+structured, defensively coded, and consistently documented.
+
+Risk level before demo trading: HIGH. Before proceeding to Step 2, specific
+issues documented in this report must be resolved.
+
+
+================================================================================
+B. REPOSITORY INVENTORY
+================================================================================
+
+File                         | Lines  | Purpose
+-----------------------------|--------|-------------------------------------------
+main.py                      | ~1446  | Bot entry point, commands, background loops
+ai_engine.py                 | ~1181  | Groq LLM chat layer ("Venchick AI")
+bias_engine.py               | ~638   | Multi-TF confluence aggregator
+database.py                  | ~1239  | SQLite persistence via aiosqlite
+memory_engine.py             | ~683   | Persistent conversation/alert memory
+news_engine.py               | ~1036  | Economic calendar + killswitch + sentiment
+second_opinion_engine.py     | ~450   | LLM signal veto/quality filter
+smc_engine.py                | ~598   | Liquidity, FVGs, order blocks, sweeps
+structure_engine.py          | ~427   | BOS/CHOCH/trend bias, premium/discount
+session_engine.py            | ~415   | Session clock, PDH/PDL/ASH/ASL levels
+chart_engine.py              | ~199   | In-memory PNG candlestick chart renderer
+mt5_engine.py                | ~458   | MT5 connection, market data, lot sizing
+.gitignore                   | 10     | Excludes .env, __pycache__, logs, venvs
+
+No .env file present in repository (correctly excluded by .gitignore).
+No test files found.
+No requirements.txt or pyproject.toml found.
+
+
+================================================================================
+C. FILE-BY-FILE ANALYSIS
+================================================================================
+
+------------------------------------------------------------------------
+main.py
+------------------------------------------------------------------------
+Purpose      : Bot entry point. Wires all engines together, defines all
+               Discord slash commands, manages three background loops,
+               handles lifecycle.
+Classes      : ForexBot (extends commands.Bot), SignalView (persistent UI
+               button), MakeAccountModal (discord.ui.Modal)
+Key functions: _analyze_with_confluence, signal_scanner_loop,
+               price_ticker_loop, check_news_events_task,
+               _open_and_broadcast_signal, on_ready, on_message,
+               makeaccount, logtrade, addbalance, deductbalance,
+               balance, statement
+Inputs       : Discord events, env vars (DISCORD_TOKEN, GUILD_ID, channel IDs)
+Outputs      : Discord embeds, PNG chart files, private channels, SQLite writes
+Dependencies : discord.py, python-dotenv, all project modules
+Active       : YES — central orchestrator
+Incomplete   : memory_engine.restore_bot_state_on_startup() is defined but
+               NEVER called in on_ready(). evaluate_past_alerts_outcomes()
+               has no scheduled caller.
+Duplicate    : _pip_size() duplicates pip-size logic from mt5_engine/session_engine
+               but uses a simplified heuristic that is WRONG for XAUUSD.
+
+------------------------------------------------------------------------
+mt5_engine.py
+------------------------------------------------------------------------
+Purpose      : MT5 connection management, OHLCV data fetching, technical
+               indicator calculation, market structure signal generation,
+               lot sizing.
+Key functions: init_mt5, ensure_connected, shutdown_mt5, get_market_data,
+               get_live_spread, analyze_market_structure,
+               calculate_lot_size_micro, calculate_lot_size_standard
+Inputs       : Symbol name, timeframe, credential config dict
+Outputs      : pandas DataFrames, signal dicts (action/entry/sl/tp*/confidence)
+Dependencies : MetaTrader5, pandas, numpy
+Active       : YES — called by all signal loops and AI context gathering
+CRITICAL BUG : MT5_CONFIG is hardcoded with all None values. No code reads
+               MT5 credentials from environment variables. See Section O & S.
+Duplicate    : None
+
+------------------------------------------------------------------------
+ai_engine.py
+------------------------------------------------------------------------
+Purpose      : Groq-powered "Venchick AI" analyst. Gathers market context
+               from all engines, builds structured system prompt, manages
+               per-channel conversation history, calls Groq Llama 3.3 70B.
+Key functions: generate_ai_response, _gather_market_context, _system_prompt,
+               configure, extract_chart_tag
+Inputs       : User message string, channel_context dict
+Outputs      : Response text string (may end with [GENERATE_CHART:SYMBOL] tag)
+Dependencies : groq SDK, all institutional engines (defensive imports),
+               memory_engine, database
+Active       : YES — invoked on every @mention or private room message
+ISSUE        : No explicit asyncio.wait_for() timeout on main Groq chat call.
+               If Groq is slow, the bot event loop can stall indefinitely.
+Duplicate    : None
+
+------------------------------------------------------------------------
+bias_engine.py
+------------------------------------------------------------------------
+Purpose      : Aggregates structure, SMC, session, and news outputs into a
+               single overall bias and set of conditional trade scenarios.
+Key functions: evaluate_xauusd_bias_and_scenarios, _compute_overall_bias,
+               _compute_confluence_score, _build_bullish_continuation,
+               _build_bearish_continuation, _build_liquidity_raid_reversal
+Inputs       : Symbol name, upstream engine results (gathered concurrently)
+Outputs      : Dict with overall_bias, confluence_score (1-5),
+               active_scenarios, risk_overlay
+Dependencies : structure_engine, smc_engine, session_engine, news_engine
+               (all defensive imports)
+Active       : YES — called by _analyze_with_confluence in main.py
+Incomplete   : Documented limitation — "RSI divergence" check for reversal
+               scenarios is implemented as CHOCH proxy, not a real RSI check.
+Duplicate    : None
+
+------------------------------------------------------------------------
+chart_engine.py
+------------------------------------------------------------------------
+Purpose      : Renders TradingView-style dark-themed 15M candlestick charts
+               with Entry/SL/TP levels as in-memory PNG buffers.
+Key functions: generate_signal_chart
+Inputs       : Symbol name, OHLC DataFrame, entry/sl/tp levels
+Outputs      : io.BytesIO PNG buffer (zero disk writes)
+Dependencies : matplotlib, pandas
+Active       : YES — called for every signal broadcast and AI chart requests
+Incomplete   : None — appears complete and clean.
+
+------------------------------------------------------------------------
+database.py
+------------------------------------------------------------------------
+Purpose      : SQLite persistence layer via aiosqlite. Manages traders,
+               signals, transactions, message logs, alert logs,
+               user preferences.
+Classes      : AccountType, SignalAction, SignalStatus, TransactionType,
+               Trader, UserPreferences, Transaction, Signal
+Key functions: init_db, add_trader, get_trader, update_balance, log_signal,
+               update_signal_status, get_active_signals, update_user_balance,
+               get_transaction_history, save_user_preferences,
+               get_user_preferences, get_traders_for_news_delivery
+Dependencies : aiosqlite
+Active       : YES — central persistence layer
+Incomplete   : None — complete for current feature set.
+
+------------------------------------------------------------------------
+memory_engine.py
+------------------------------------------------------------------------
+Purpose      : Persistent conversation + alert memory. Logs AI interactions
+               and alert events to SQLite, provides recall on startup,
+               evaluates past alert outcomes against live prices.
+Key functions: log_interaction, log_alert_event, restore_bot_state_on_startup,
+               evaluate_past_alerts_outcomes, get_recent_conversation_memory,
+               get_recent_alert_history
+Dependencies : aiosqlite, database, mt5_engine (defensive), news_engine (defensive)
+Active       : PARTIAL — log_interaction and log_alert_event are called.
+               restore_bot_state_on_startup and evaluate_past_alerts_outcomes
+               are defined but NEVER wired into on_ready() or any scheduled task.
+Incomplete   : YES — startup recovery and outcome tracking are dead code paths.
+
+------------------------------------------------------------------------
+news_engine.py
+------------------------------------------------------------------------
+Purpose      : Economic calendar, news freeze window, sentiment scoring,
+               emergency killswitch, AI-formatted news context.
+Key functions: check_economic_calendar, is_news_freeze_active,
+               analyze_headline_sentiment, check_emergency_killswitch,
+               fetch_usd_economic_calendar, get_upcoming_high_impact_usd_events,
+               check_pending_news_alerts, get_institutional_news_context
+Inputs       : None (uses env vars for API keys)
+Outputs      : Event lists, killswitch status, sentiment strings
+Dependencies : aiohttp, Finnhub, JBlanked, TradingEconomics (3-tier fallback),
+               NewsAPI
+Active       : YES — called every scan cycle
+NOTE         : from dotenv import load_dotenv; load_dotenv() is called at
+               MODULE LEVEL (lines 78-79) — this means importing news_engine
+               will side-effect load the .env file. Unusual pattern.
+               JBlanked's free tier is 1 request/day — in practice the bot
+               will fall through to Finnhub/TradingEconomics nearly always.
+
+------------------------------------------------------------------------
+second_opinion_engine.py
+------------------------------------------------------------------------
+Purpose      : LLM-based final qualitative filter on an already-confirmed
+               signal. Only allowed to veto or reduce confidence (-20 to 0),
+               never increase it or alter prices.
+Key functions: get_second_opinion, _parse_verdict, _build_context_text,
+               _safe_log_verdict
+Inputs       : Symbol, deterministic analysis dict, bias context dict
+Outputs      : SecondOpinionVerdict (proceed bool, confidence_adjustment int,
+               reason str)
+Dependencies : groq SDK, news_engine, memory_engine (defensive)
+Active       : YES — called in _open_and_broadcast_signal
+Incomplete   : None — clean implementation with proper 8s timeout and fallback.
+
+------------------------------------------------------------------------
+session_engine.py
+------------------------------------------------------------------------
+Purpose      : UTC session clock (Asian/London/NY/Overlap), previous period
+               high/low levels (PDH/PDL/PWH/PWL/PMH/PML), Asian session
+               high/low, ICT "Judas Swing" sweep detection.
+Key functions: get_xauusd_session_context, determine_session_context
+Active       : YES — used by bias_engine and ai_engine context gathering
+Incomplete   : None
+Duplicate    : Pip-size logic duplicated across session_engine, mt5_engine,
+               and main.py.
+
+------------------------------------------------------------------------
+smc_engine.py
+------------------------------------------------------------------------
+Purpose      : Smart Money Concepts analysis — BSL/SSL liquidity pools,
+               equal highs/lows (EQH/EQL), liquidity sweeps, unfilled FVGs,
+               order blocks.
+Key functions: analyze_xauusd_smc, determine_smc_structure
+Active       : YES — used by bias_engine and ai_engine context gathering
+Duplicate    : Fractal swing detection is near-identical to structure_engine.py.
+
+------------------------------------------------------------------------
+structure_engine.py
+------------------------------------------------------------------------
+Purpose      : Fractal-based swing detection, BOS/CHOCH classification,
+               trend bias scoring, premium/discount zone mapping.
+Key functions: analyze_xauusd_structure, determine_market_structure
+Active       : YES — used by bias_engine and ai_engine context gathering
+Duplicate    : Fractal swing logic near-identical to smc_engine.py.
+
+
+================================================================================
+D. ARCHITECTURE DIAGRAM (ASCII)
+================================================================================
+
++---------------------------------------------------------------------+
+|                         main.py (Bot)                               |
+|                                                                     |
+|  on_ready():                                                        |
+|    init_db() ─────────────────────────────────> database.py        |
+|    init_mt5() ─────────────────────────────────> mt5_engine.py     |
+|    start [3 background loops]                                       |
+|                                                                     |
+|  +──────────────────────────────────────────────────────────────+  |
+|  | signal_scanner_loop (every 10s)                              |  |
+|  |   check_emergency_killswitch() ─────────> news_engine.py    |  |
+|  |   is_news_freeze_active() ──────────────> news_engine.py    |  |
+|  |   ensure_connected() ───────────────────> mt5_engine.py     |  |
+|  |   get_active_signals() ─────────────────> database.py       |  |
+|  |   for each unwatched pair:                                   |  |
+|  |     _analyze_with_confluence(symbol)                         |  |
+|  |       analyze_market_structure() ──────> mt5_engine.py      |  |
+|  |       evaluate_xauusd_bias_and_scenarios()                   |  |
+|  |         analyze_xauusd_structure() ────> structure_engine    |  |
+|  |         analyze_xauusd_smc() ──────────> smc_engine         |  |
+|  |         get_xauusd_session_context() ──> session_engine      |  |
+|  |         _fetch_news_overlay() ─────────> news_engine         |  |
+|  |     _open_and_broadcast_signal()                             |  |
+|  |       get_second_opinion() ───────────> second_opinion_engine|  |
+|  |       log_signal() ───────────────────> database.py          |  |
+|  |       calculate_lot_size_*() ─────────> mt5_engine.py       |  |
+|  |       generate_signal_chart() ────────> chart_engine.py     |  |
+|  |       channel.send(embed+chart+button) > Discord             |  |
+|  +──────────────────────────────────────────────────────────────+  |
+|                                                                     |
+|  +──────────────────────────────────────────────────────────────+  |
+|  | price_ticker_loop (every 5s)                                 |  |
+|  |   get_active_signals() ─────────────────> database.py       |  |
+|  |   get_market_data(M1) ──────────────────> mt5_engine.py     |  |
+|  |   _evaluate_signal_status()                                  |  |
+|  |   update_signal_status() ──────────────> database.py        |  |
+|  |   thread.send(TP/SL update) ───────────> Discord            |  |
+|  +──────────────────────────────────────────────────────────────+  |
+|                                                                     |
+|  +──────────────────────────────────────────────────────────────+  |
+|  | check_news_events_task (every 60s)                           |  |
+|  |   check_pending_news_alerts() ─────────> news_engine.py     |  |
+|  |   _build_post_release_embed()                                |  |
+|  |     generate_ai_response() ────────────> ai_engine.py       |  |
+|  |       _gather_market_context() → mt5/structure/smc/         |  |
+|  |                                   session/bias engines       |  |
+|  |       Groq API call ────────────────────> [Groq Cloud]      |  |
+|  |   _deliver_personalized_post_release()                       |  |
+|  |     get_traders_for_news_delivery() ───> database.py        |  |
+|  +──────────────────────────────────────────────────────────────+  |
+|                                                                     |
+|  on_message() [AI Chat]:                                            |
+|    generate_ai_response() ──────────────────> ai_engine.py         |
+|    _safe_log_interaction() [background] ────> memory_engine.py     |
+|    log_alert_event() [via second_opinion] ──> memory_engine.py     |
+|                                                                     |
+|  Slash Commands:                                                    |
+|    /makeaccount -> add_trader()+save_user_preferences() -> DB      |
+|    /logtrade -> update_balance()+update_trader_stats() -> DB       |
+|    /balance, /statement -> DB reads                                 |
+|    /addbalance, /deductbalance -> update_user_balance() -> DB      |
++─────────────────────────────────────────────────────────────────────+
+
+Persistence: SQLite (forex_bot.db)
+             Tables: traders, signals, transactions,
+                     message_logs, alert_logs, user_preferences
+
+
+================================================================================
+E. APPLICATION STARTUP / EXECUTION FLOW
+================================================================================
+
+FOUND:
+
+1. Entry point: main() in main.py, invoked as: python main.py
+2. Token check: Raises RuntimeError if DISCORD_TOKEN is not set
+3. bot.run(DISCORD_TOKEN) -> connects to Discord, blocks
+4. setup_hook(): Syncs slash command tree to guild (or globally if GUILD_ID=0)
+5. on_ready():
+   - Logs bot identity
+   - database.init_db() — creates/migrates tables, enables WAL
+   - mt5_engine.init_mt5() — attempts MT5 connection (up to 10 retries, 5s
+     apart); logs error if fails but does NOT abort startup
+   - Starts signal_scanner_loop (10s), price_ticker_loop (5s),
+     check_news_events_task (60s)
+   - ai_engine.configure(extra_pairs=WATCHED_PAIRS)
+
+MISSING from on_ready():
+  - memory_engine.restore_bot_state_on_startup() — defined but never called
+  - evaluate_past_alerts_outcomes() — never scheduled
+
+Shutdown:
+  - finally: asyncio.run(_shutdown()) after bot.run() returns
+  - _shutdown() cancels all three loops and calls mt5_engine.shutdown_mt5()
+  - ISSUE: asyncio.run(_shutdown()) inside a finally after bot.run() creates
+    a NEW event loop; the old one may already be stopping. Can silently fail.
+
+Exception handling: Each background loop wraps individual pair/alert with
+  try/except. A single failing pair does not stop the scanner.
+
+Restart behavior: MISSING — no automatic restart mechanism (systemd/supervisor).
+  Bot must be restarted externally.
+
+
+================================================================================
+F. MT5 INTEGRATION ANALYSIS
+================================================================================
+
+Feature                        | Status
+-------------------------------|--------------------------------------------------
+MT5 initialization             | FOUND: init_mt5() with 10 retries, 5s apart,
+                               |         asyncio.Lock guard
+Connection status check        | FOUND: ensure_connected() checks _connected flag
+                               |         + mt5.terminal_info()
+Account information retrieval  | MISSING: no mt5.account_info() call anywhere
+Symbol handling                | FOUND: mt5.symbol_select(symbol, True) used
+Market prices                  | FOUND: copy_rates_from_pos (OHLCV);
+                               |         symbol_info (spread)
+Position retrieval             | MISSING: no mt5.positions_get()
+Order creation                 | MISSING: not implemented
+Order modification             | MISSING: not implemented
+Position closing               | MISSING: not implemented
+Live trade execution           | IMPOSSIBLE: no order/position functions exist
+Demo/live mode separation      | MISSING
+MT5 credentials from .env      | MISSING — MT5_CONFIG hardcoded all-None
+Multiple MT5 accounts          | NOT SUPPORTED
+
+CRITICAL FINDING — MT5_CONFIG is never populated from environment:
+
+  # mt5_engine.py lines 33-39
+  MT5_CONFIG = {
+      "login":    None,   # <-- never filled from os.getenv()
+      "password": None,   # <-- never filled from os.getenv()
+      "server":   None,   # <-- never filled from os.getenv()
+      "path":     None,
+      "timeout":  60000,
+  }
+
+There is NO code anywhere that reads MT5_LOGIN, MT5_PASSWORD, MT5_SERVER etc.
+from os.getenv(). The bot connects to MT5 only if the terminal is already
+running and already logged in, because _do_mt5_init() skips mt5.login() when
+credentials are None. This is fragile — it relies entirely on the terminal
+being pre-authenticated at OS level.
+
+INFERRED: The developer likely pre-logs into the MT5 terminal manually before
+starting the bot.
+
+
+================================================================================
+G. XAUUSD HANDLING
+================================================================================
+
+Feature                        | Status
+-------------------------------|--------------------------------------------------
+XAUUSD hard-coded              | PARTIAL: in WATCHED_PAIRS list; also default
+                               |  arg in session/smc/structure/bias engine APIs
+Symbol names configurable      | YES: WATCHED_PAIRS list in main.py
+Broker-specific symbol suffixes| NOT SUPPORTED: "XAUUSD" used literally;
+                               |  RoboForex may use "XAUUSDm" etc.
+Point size handling            | FOUND: reads from symbol_info.point correctly
+Pip size handling              | FOUND in mt5/session/smc engines (correct).
+                               |  WRONG in main.py _pip_size() — see bug below.
+Tick size / tick value         | FOUND: used in lot sizing (trade_tick_size,
+                               |  trade_tick_value)
+Contract size                  | FOUND: used in fallback lot sizing
+Digits handling                | FOUND: _price_digits() queries symbol_info.digits
+Spread considered              | PARTIAL: fetched and shown in AI context;
+                               |  NOT used as a gate in entry/SL/TP calculations
+Slippage                       | NOT CONSIDERED
+
+BUG — _pip_size() in main.py is wrong for XAUUSD:
+
+  def _pip_size(symbol: str) -> float:
+      return 0.01 if "JPY" in symbol.upper() else 0.0001
+                                                  ^^^^^^^
+  This returns 0.0001 for XAUUSD. But Gold's pip is 0.01 (not 0.0001).
+  Result: _sl_pips() returns a value ~100x too large for XAUUSD, so
+  calculate_lot_size_micro() returns a lot size ~100x too SMALL on
+  public broadcast cards.
+
+  The private-room lot sizes (which call mt5_engine.calculate_lot_size_*()
+  directly with real broker symbol_info) are CORRECT.
+  Only the illustrative lot sizes on public broadcast cards are affected.
+
+
+================================================================================
+H. STRATEGY / SIGNAL PIPELINE
+================================================================================
+
+FOUND — Complete signal generation pipeline:
+
+TIER 1 — Base signal (mt5_engine.analyze_market_structure):
+  - Fetches M15/H1/H4/D1 OHLCV data (250 candles each)
+  - Computes: EMA(20/50/200), RSI(14), ATR(14), Bollinger Bands(20,2)
+  - Multi-TF trend alignment via EMA stack (+1 bull / -1 bear / 0 mixed)
+  - Swing high/low from most recent 60 H4 bars
+  - Signal conditions (requires >=3/4 TF alignment):
+      BUY : Mean Reversion (bounce at support, RSI<55)
+            Breakout (above prior swing high)
+            Momentum (aligned uptrend, RSI>50, not overbought)
+      SELL: Mirror of above
+  - Levels: entry = current price
+            SL    = +/- 1.5 x ATR
+            TP1/2/3 = 1:1 / 2:1 / 3:1 risk-reward
+  - Confidence = (aligned_count / 4) x 100%
+
+TIER 2 — Confluence filter (bias_engine.evaluate_xauusd_bias_and_scenarios):
+  - structure_engine : BOS/CHOCH on D1/H4/H1/M15, trend bias, premium/discount
+  - smc_engine       : active BSL/SSL, equal H/L, sweeps, FVGs, order blocks
+  - session_engine   : session clock, PDH/PDL/PWH/PWL/PMH/PML, ASH/ASL
+  - news_engine      : freeze window, killswitch, upcoming high-impact events
+  - Computes overall_bias (STRONG_BULLISH / BULLISH / NEUTRAL / BEARISH /
+    STRONG_BEARISH) and confluence_score (1-5)
+  - Builds conditional scenarios:
+      BULLISH_CONTINUATION: bullish bias + discount zone + near bullish OB/FVG
+      BEARISH_CONTINUATION: mirror
+      LIQUIDITY_RAID_REVERSAL: sweep of PDH/PDL/PWH/PWL + M15 CHOCH opposing
+  - Filter gates:
+      base model direction must agree with overall_bias
+      AND confluence_score >= MIN_CONFLUENCE_SCORE (3/5)
+      AND at least 1 active scenario must exist
+  - Blended confidence: (base_confidence + confluence_score/5*100) / 2
+
+TIER 3 — Second opinion filter (second_opinion_engine.get_second_opinion):
+  - LLM (Llama 3.3 70B) receives: signal levels, bias context, news overlay,
+    recent alert history for this symbol
+  - LLM can ONLY: veto (proceed=false) or reduce confidence (-20 to 0)
+  - Strict JSON output, fallback=proceed on any failure, 8s timeout
+
+RESULT: Signal broadcast to Discord channels
+  - Under-$200 channel (always)
+  - Over-$200 channel (always)
+  - High-winrate channel (if confidence >= 75%)
+  - Private rooms (on account join / via news delivery)
+
+STRATEGY FEATURES — FOUND:
+  [x] EMA (20/50/200) trend alignment
+  [x] RSI (14) — used in base signal conditions
+  [x] ATR (14) — used for SL/TP calculation
+  [x] Bollinger Bands (20,2) — used in breakout/momentum guards
+  [x] BOS/CHOCH — structure_engine
+  [x] Market structure (trend bias, premium/discount zones)
+  [x] Liquidity sweeps — smc_engine
+  [x] Fair value gaps — smc_engine
+  [x] Support/resistance (swing highs/lows, equal highs/lows)
+  [x] Order blocks — smc_engine
+  [x] Sessions (Asian/London/NY/Overlap) — session_engine
+  [x] News filtering — news_engine
+  [x] AI / second opinion — ai_engine, second_opinion_engine
+
+STRATEGY FEATURES — MISSING:
+  [ ] VWAP — not implemented in any engine
+  [ ] RSI divergence (documented limitation in bias_engine)
+  [ ] Volume analysis (tick_volume is fetched but unused in signals)
+
+
+================================================================================
+I. RISK MANAGEMENT
+================================================================================
+
+Feature                        | Status
+-------------------------------|--------------------------------------------------
+% risk per trade               | INFERRED: 1% of balance for private cards
+                               |  (DEFAULT_RISK_PERCENT = 1.0)
+Fixed risk (public cards)      | FOUND: $10 micro / $100 standard reference
+Lot-size calculation           | FOUND: calculate_lot_size_micro/standard()
+                               |  uses broker tick values correctly
+Stop-loss calculation          | FOUND: 1.5 x ATR
+Take-profit calculation        | FOUND: 1:1 / 2:1 / 3:1 RR ratios
+Maximum daily loss             | MISSING
+Maximum account drawdown       | MISSING
+Max simultaneous trades        | PARTIAL: prevents duplicate signal per pair;
+                               |  no per-user position count limit
+Maximum exposure               | MISSING
+Spread protection              | MISSING: spread fetched but not used as gate
+Slippage protection            | MISSING
+Margin protection              | MISSING
+Consecutive-loss protection    | MISSING
+Trading cooldown               | MISSING
+Emergency stop (killswitch)    | FOUND: halts signal GENERATION only
+Account-level risk limits      | MISSING
+
+IMPORTANT: This bot does NOT execute trades. All risk management above relates
+to the signal generation side only. No actual open positions are managed by
+this code. The "balance" tracked in the database is a virtual/notional balance,
+not the real MT5 account balance.
+
+BYPASS RISK: The confirm=True flag on /deductbalance allows an admin to set
+any balance to a negative value. Negative balance would produce incorrect lot
+sizing in lot-size calculations.
+
+
+================================================================================
+J. NEWS AND SESSION SYSTEMS
+================================================================================
+
+NEWS ENGINE — FOUND:
+
+Feature                        | Status
+-------------------------------|--------------------------------------------------
+Primary calendar provider      | JBlanked (JBLANKED_API_KEY, MQL5-sourced)
+Fallback 1                     | Finnhub (FINNHUB_API_KEY)
+Fallback 2                     | TradingEconomics guest (guest:guest, no key)
+Breaking headlines             | NewsAPI (NEWSAPI_API_KEY) or Finnhub fallback
+Supported currencies           | USD, EUR, GBP, JPY, CHF, AUD, CAD, NZD
+High-impact detection          | API rating + keyword fallback list
+Freeze window                  | +/- 15 minutes around high-impact events
+Pre-news warning               | 30 minutes before
+Post-release window            | 15 minutes after
+Timezone handling              | All UTC internally
+Failure behavior               | Returns empty event list = no freeze active
+Killswitch patterns            | 22 keyword patterns (flash crash, invasion,
+                               |  circuit breaker, etc.) + sentiment=Volatile
+Deduplication                  | _alerted_pre_warnings / _alerted_post_releases
+Caching TTLs                   | JBlanked: 23h; Finnhub: 5min;
+                               |  TradingEconomics: 6h; breaking news: 30s
+
+NOTE: JBlanked free tier is 1 request/day. In practice the bot will primarily
+run on Finnhub/TradingEconomics.
+
+SESSION ENGINE — FOUND:
+
+Session                        | UTC Hours
+-------------------------------|----------
+Asian                          | 00:00 - 09:00
+London                         | 07:00 - 16:00
+New York                       | 12:00 - 21:00
+London/NY Overlap              | 12:00 - 16:00
+
+Priority when multiple sessions active: Overlap > NY > London > Asian
+
+Levels fetched from MT5:
+  PDH/PDL  = Prior D1 candle high/low
+  PWH/PWL  = Prior W1 candle high/low
+  PMH/PML  = Prior MN1 candle high/low
+  ASH/ASL  = Today's Asian session high/low from M15 data
+
+Asian range sweep detection: ICT "Judas Swing" — checks if post-Asian-close
+  price trades beyond ASH (ash_swept) or ASL (asl_swept) during London/NY.
+
+Effect on trading: Informs bias_engine confluence score and scenario triggers;
+  provides AI context. Sessions are not hard gates in the signal scanner.
+
+
+================================================================================
+K. AI / SECOND OPINION / MEMORY SYSTEMS
+================================================================================
+
+AI ENGINE — FOUND:
+
+What AI does        : Conversational analyst grounding every response in live
+                      bot data (prices, structure, SMC, session, news, bias,
+                      user profile, memory). Follows strict "LIVE DATA CONTEXT"
+                      instructions. Can tag response with [GENERATE_CHART:SYMBOL].
+Required for signal : NO — AI is for chat (on_message) only. Signal generation
+                      loops do not go through ai_engine chat.
+Can AI execute trades: NO — LLM has no tool-calling capability and no path
+                       to mt5_engine order functions (which don't exist anyway).
+Output validation   : Minimal for chat (only chart-tag extraction). Strict JSON
+                       parsing for second opinion with fallback on any failure.
+AI failure behavior : Chat failures return a fixed error message. Signal
+                       generation is unaffected.
+Determinism         : Temperature 0.5 for chat (non-deterministic).
+                      Temperature 0.2 for second opinion (more deterministic).
+External dependency : Groq Cloud API — single point of failure for chat and
+                       second-opinion features.
+Timeout             : FOUND (8s) for second opinion.
+                      MISSING for chat AI call — can stall event loop.
+Error handling      : Chat: broad except Exception -> fallback message.
+                      Second opinion: individual error handling per path.
+
+SECOND OPINION ENGINE — FOUND:
+  Clean implementation. 8s timeout. JSON-only output. Fallback to proceed=True
+  on any failure. Confidence adjustment clamped to [-20, 0]. Every verdict
+  logged to SQLite alert_logs.
+
+MEMORY ENGINE — FOUND:
+
+Function                           | Status
+-----------------------------------|------------------------------------------
+log_interaction()                  | FOUND: logs every AI chat to message_logs
+log_alert_event()                  | FOUND: logs news/SMC/second-opinion events
+restore_bot_state_on_startup()     | DEFINED but NEVER called in on_ready()
+evaluate_past_alerts_outcomes()    | DEFINED but NEVER scheduled anywhere
+get_recent_conversation_memory()   | FOUND: called by ai_engine for context
+get_recent_alert_history()         | FOUND: called by ai_engine/second_opinion
+
+
+================================================================================
+L. DATABASE AND PERSISTENCE
+================================================================================
+
+Technology     : SQLite via aiosqlite (fully async)
+WAL mode       : ENABLED (PRAGMA journal_mode=WAL)
+Foreign keys   : ENABLED (PRAGMA foreign_keys=ON)
+DB path        : "forex_bot.db" (hardcoded relative path)
+Connection     : Each function opens/closes its own short-lived connection
+                 (no pool — intentional design choice)
+
+Tables:
+
+Table              | Purpose
+-------------------|----------------------------------------------------------
+traders            | Discord user accounts (balance, account_type,
+                   |  private_channel_id, total_profit, win_rate)
+signals            | Signal cards (pair, action, entry/sl/tp*, status,
+                   |  confidence, recommended_strategy)
+transactions       | Financial ledger (deposits, withdrawals, adjustments,
+                   |  fees)
+message_logs       | AI interaction history (prompt, response, market snapshot)
+alert_logs         | Alert events with 30m/2h price outcome slots
+user_preferences   | /makeaccount profile (broker, pairs, country, balance)
+
+Migrations     : Handled in init_db() via PRAGMA table_info + ALTER TABLE.
+                 Safe to run repeatedly. Covers: adding confidence/
+                 recommended_strategy to signals; currency to traders;
+                 widening alert_logs.event_type CHECK for SECOND_OPINION.
+
+Concurrency    : Each function uses its own connection. Thread-safe by design.
+                 No asyncio.Lock needed per aiosqlite's documented model.
+
+Recovery       : init_db() is idempotent; CREATE TABLE IF NOT EXISTS ensures
+                 no data loss on restart.
+
+MISSING:
+  - No DB backup mechanism
+  - No DB vacuum/maintenance scheduled task
+  - outcome_30m / outcome_2h in alert_logs always NULL (evaluate_past_alerts
+    _outcomes() never runs)
+
+
+================================================================================
+M. LOGGING AND AUDITABILITY
+================================================================================
+
+Framework      : Python standard logging module
+Config         : basicConfig(level=INFO, format="%(asctime)s [%(levelname)s]
+                 %(name)s: %(message)s")
+Loggers        : Named per module (forex_bot.main, mt5_engine, news_engine, etc.)
+Output         : Console stdout ONLY
+Log files      : NOT CONFIGURED (.gitignore excludes *.log suggesting planned
+                 but not implemented)
+Rotation       : NOT CONFIGURED
+Log level      : INFO (DEBUG available with config change)
+
+Audit trail coverage:
+
+Item                           | Status
+-------------------------------|--------------------------------------------------
+MT5 connection/disconnection   | FOUND: logged at INFO
+Signal generation              | FOUND: logger.info("Broadcast signal #%s...")
+Signal TP/SL hits              | FOUND: logged at INFO
+News freeze / killswitch       | FOUND: logged at INFO
+AI second opinion verdicts     | FOUND: console INFO + SQLite alert_logs
+Trade logging (/logtrade)      | FOUND: SQLite only (no explicit console log)
+Balance changes                | FOUND: SQLite transactions table
+Startup/shutdown               | FOUND: logged at INFO
+Exception details              | FOUND: logger.exception() throughout
+
+MISSING:
+  - No persistent log files — all console output lost on restart
+  - No structured (JSON) log format for external log analysis
+  - Signal auto-close events (TP3 hit -> CLOSED) logged to console only,
+    no dedicated audit record beyond signal status in DB
+
+
+================================================================================
+N. DISCORD INTEGRATION
+================================================================================
+
+Framework      : discord.py >= 2.0 with app_commands (slash commands) and
+                 commands.ext.tasks (background loops)
+Intents        : guilds, members (private channel naming),
+                 message_content (on_message AI chat)
+
+Slash Commands:
+
+Command            | Access              | Purpose
+-------------------|---------------------|---------------------------------------
+/makeaccount       | Any guild member    | Creates account + private channel (Modal)
+/logtrade          | Account holders     | Log trade result + balance update
+/balance           | Self / admin others | View account balance and stats
+/statement         | Self / admin others | Last 10 transactions
+/addbalance        | Admin only          | Credit a trader's account
+/deductbalance     | Admin only          | Debit a trader's account
+
+Admin gate: _is_staff() checks guild_permissions.administrator OR guild.owner_id
+
+Private channels: Created per-user on /makeaccount. Only the user + bot can see.
+
+Signal cards: Rich embeds with Entry/SL/TP, lot sizes, chart PNG, persistent
+  "Took Trade" button (SignalView). Threads created on TP/SL hits for updates.
+
+MISSING:
+  - No role-based access beyond Administrator/owner check
+  - No configurable roles for "signal analyst" vs "account admin"
+  - No command to deactivate/delete an account
+  - No admin command to view all traders or all active signals
+
+
+================================================================================
+O. SECURITY AUDIT
+================================================================================
+
+CONFIRMED SAFE:
+  [x] No hardcoded secrets in source code
+  [x] All API keys read from environment variables
+  [x] .env correctly gitignored
+  [x] All database queries use parameterized ? placeholders (no SQL injection)
+  [x] No unsafe subprocess usage
+  [x] No arbitrary code execution
+
+SECURITY ISSUES FOUND:
+
+Issue 1 — MT5 Credentials Not Loaded (Severity: HIGH)
+  FILE     : mt5_engine.py
+  LOCATION : MT5_CONFIG dict (lines 33-39)
+  ISSUE    : MT5_CONFIG has all None values. No env-var loading exists.
+             The bot connects to the already-running MT5 terminal without
+             logging in programmatically. If the terminal is logged out,
+             the bot silently fails to connect with no clear error about
+             missing credentials.
+  FIX      : Add os.getenv("MT5_LOGIN"), os.getenv("MT5_PASSWORD"),
+             os.getenv("MT5_SERVER") loading into MT5_CONFIG at module
+             startup, with validation before init_mt5() is called.
+
+Issue 2 — No AI Response Timeout for Chat (Severity: MEDIUM)
+  FILE     : ai_engine.py
+  LOCATION : generate_ai_response() -> client.chat.completions.create()
+  ISSUE    : No asyncio.wait_for() timeout wraps the Groq chat call.
+             If Groq is slow, the on_message handler will stall indefinitely,
+             potentially blocking the Discord event loop.
+  FIX      : Wrap with asyncio.wait_for(..., timeout=30.0)
+
+Issue 3 — news_engine calls load_dotenv() at module import level (Severity: LOW)
+  FILE     : news_engine.py
+  LOCATION : Lines 78-79 (module scope)
+  ISSUE    : Any import of news_engine immediately loads .env into os.environ.
+             Not a security issue per se, but surprising and breaks test isolation.
+  FIX      : Move load_dotenv() to main.py only.
+
+Issue 4 — Negative balance allowed with admin confirm=True (Severity: LOW)
+  FILE     : main.py
+  LOCATION : deductbalance command
+  ISSUE    : Admin can set balance to a negative number, causing incorrect
+             lot sizing (negative risk -> negative lots).
+  FIX      : Add floor check in _send_private_welcome_signals or calculate_lot_size.
+
+
+================================================================================
+P. CONCURRENCY / ASYNC ANALYSIS
+================================================================================
+
+Async framework    : asyncio (single-threaded event loop)
+Background loops   : discord.ext.tasks (3 loops: 10s, 5s, 60s)
+Thread executor    : MT5 blocking calls offloaded via loop.run_in_executor()
+MT5 init lock      : asyncio.Lock() guards init_mt5() reconnect attempts
+
+CONCURRENCY ISSUES:
+
+Issue 1 — Shared mutable state without locks (Severity: MEDIUM)
+  LOCATION : main.py — SIGNAL_MESSAGES dict, SIGNAL_THREADS dict,
+             _last_killswitch_state bool
+  ISSUE    : Mutated by both signal_scanner_loop and price_ticker_loop.
+             Safe in practice (asyncio is cooperative, not preemptive), but
+             fragile by design. Thread executors do not write to these dicts,
+             so no actual race condition currently exists.
+  FIX      : Document the single-threaded assumption clearly.
+
+Issue 2 — asyncio.create_task fire-and-forget (Severity: LOW)
+  LOCATION : ai_engine.py generate_ai_response()
+  ISSUE    : Untracked tasks can be garbage collected before completing
+             if the bot restarts quickly. Acceptable for logging.
+  FIX      : Acceptable as designed; already documented in code.
+
+Issue 3 — No duplicate order protection for future trade execution (Severity: LOW)
+  ISSUE    : When trade execution is added later, the "no duplicate signals
+             per pair" check (active_pairs set) provides some protection but
+             runs inside signal_scanner_loop only. A restart between the check
+             and the DB write could allow two signals for the same pair.
+  FIX      : When adding trade execution, add DB-level uniqueness constraint
+             on (pair, status='ACTIVE').
+
+
+================================================================================
+Q. ERROR HANDLING
+================================================================================
+
+Pattern                              | Location              | Assessment
+-------------------------------------|----------------------|--------------------
+Broad except Exception + logging     | All engines           | Defensive; OK
+_fallback_result() / _fallback_verdict() | bias, 2nd opinion | Good: safe defaults
+Per-pair try/except in scanner loop  | main.py              | Correct
+Custom exception hierarchy           | database.py          | Clear
+MT5 reconnect with bounded retry     | mt5_engine.init_mt5  | Correct
+Swallowed exceptions in news caches  | news_engine          | Intentional; OK
+
+PROBLEMS:
+
+1. No timeout on chat AI call — most significant gap; see Section O Issue 2.
+
+2. Signal scanner has no rate limiting on repeated analysis failures.
+   If _analyze_with_confluence() consistently raises for a symbol, the
+   scanner will log exceptions every 10 seconds (log flood risk).
+
+3. asyncio.run(_shutdown()) inside finally after bot.run() — creates a new
+   event loop for cleanup. mt5.shutdown() is synchronous so this works in
+   practice, but is architecturally questionable.
+
+
+================================================================================
+R. TESTING STATUS
+================================================================================
+
+Unit tests          : NONE
+Integration tests   : NONE
+Mocks               : NONE
+Test framework      : NONE (no pytest, no unittest)
+Simulation mode     : MISSING
+Paper trading mode  : MISSING
+Backtesting         : MISSING
+Test coverage       : 0%
+
+Each module has an if __name__ == "__main__": smoke test block requiring a live
+MT5 terminal and internet connection. These are manual integration tests only.
+
+
+================================================================================
+S. EXISTING BUGS / PROBLEMS
+================================================================================
+
+#  | File                    | Location           | Problem               | Severity
+---|-------------------------|--------------------|-----------------------|---------
+1  | mt5_engine.py           | MT5_CONFIG dict    | MT5 credentials not   | HIGH
+   |                         |                    | loaded from .env;     |
+   |                         |                    | relies on pre-logged  |
+   |                         |                    | MT5 terminal          |
+---|-------------------------|--------------------|-----------------------|---------
+2  | main.py                 | _pip_size()        | Returns 0.0001 for    | HIGH
+   |                         |                    | XAUUSD (should be     |
+   |                         |                    | 0.01); public card    |
+   |                         |                    | lot sizes ~100x wrong |
+---|-------------------------|--------------------|-----------------------|---------
+3  | ai_engine.py            | generate_ai_       | No timeout on Groq    | MEDIUM
+   |                         | response()         | chat API call; event  |
+   |                         |                    | loop can stall        |
+---|-------------------------|--------------------|-----------------------|---------
+4  | main.py                 | on_ready()         | restore_bot_state_on_ | MEDIUM
+   |                         |                    | startup() never called|
+---|-------------------------|--------------------|-----------------------|---------
+5  | memory_engine.py        | evaluate_past_     | Never scheduled;      | MEDIUM
+   |                         | alerts_outcomes()  | alert outcome columns |
+   |                         |                    | always NULL           |
+---|-------------------------|--------------------|-----------------------|---------
+6  | main.py                 | _shutdown()        | asyncio.run() in      | LOW
+   |                         |                    | finally after bot.run |
+---|-------------------------|--------------------|-----------------------|---------
+7  | news_engine.py          | Module level       | load_dotenv() at      | LOW
+   |                         |                    | import; breaks test   |
+   |                         |                    | isolation             |
+---|-------------------------|--------------------|-----------------------|---------
+8  | mt5_engine.py           | calculate_lot_     | Standard and Micro    | LOW
+   |                         | size_standard()    | functions are         |
+   |                         |                    | identical; misleading |
+---|-------------------------|--------------------|-----------------------|---------
+9  | smc_engine.py +         | _detect_swing_     | Near-identical fractal| LOW
+   | structure_engine.py     | points()           | swing detection code  |
+   |                         |                    | duplicated            |
+---|-------------------------|--------------------|-----------------------|---------
+10 | bias_engine.py          | _build_liquidity_  | RSI divergence check  | LOW
+   |                         | raid_reversal()    | replaced by CHOCH     |
+   |                         |                    | proxy; documented but |
+   |                         |                    | incomplete            |
+
+
+================================================================================
+T. MISSING COMPONENTS
+================================================================================
+
+Required for the target system that are ABSENT:
+
+1.  MT5 credential loading from .env — Critical before any live connection
+2.  Actual trade execution — No mt5.order_send(), positions_get(), order_modify()
+3.  Multiple MT5 account management — Single global connection, single config
+4.  Per-account drawdown protection — No daily/total drawdown tracking
+5.  Emergency kill switch for live positions — Killswitch halts signal gen only
+6.  Dynamic SL/TP adjustment — No trailing stop or position management
+7.  requirements.txt — No dependency file of any kind
+8.  Any automated tests — Unit tests, integration tests, mocks
+9.  Persistent log files — No log rotation/file handler
+10. restore_bot_state_on_startup() wired into on_ready()
+11. evaluate_past_alerts_outcomes() scheduled task
+12. VWAP — Not computed anywhere
+13. Broker symbol suffix handling — RoboForex may use non-standard names
+14. Account balance sync with MT5 — DB balance is virtual; actual MT5 balance
+    not queried
+15. Spread gate on signal entry — Wide spreads not blocked by signal logic
+
+
+================================================================================
+U. TECHNICAL DEBT
+================================================================================
+
+1. Pip-size duplication — Three different pip-size implementations:
+   main.py _pip_size(), mt5_engine._pip_size(), session_engine._get_pip_size().
+   Should be one canonical function in mt5_engine.py.
+
+2. Fractal swing detection duplication — structure_engine._detect_swing_points()
+   and smc_engine._detect_swing_points() are functionally identical. Both modules
+   do their own MT5 data fetching too. Should be a shared indicators.py utility.
+
+3. MT5 called directly in multiple engines — structure_engine, smc_engine,
+   session_engine, and mt5_engine all call mt5.* functions independently.
+   No centralized MT5 call coordinator.
+
+4. calculate_lot_size_standard() is an alias — Does nothing different from
+   calculate_lot_size_micro(). The "standard vs micro" distinction for
+   RoboForex may require different minimum lot handling.
+
+5. WATCHED_PAIRS includes 8 pairs — Target system is XAUUSD-only. Non-Gold
+   signals create noise and unnecessary API load.
+
+6. No requirements.txt — Dependencies documented only in module docstrings.
+
+7. Balance in DB vs. MT5 — Virtual balance entirely disconnected from actual
+   MT5 account balance.
+
+8. news_engine.py module-level load_dotenv() — Should be in main.py only.
+
+
+================================================================================
+V. RECOMMENDED TARGET ARCHITECTURE
+================================================================================
+
+main.py                      <- Discord bot orchestrator (keep, refactor)
++-- config.py                <- NEW: centralized env-var loading + validation
++-- account_manager.py       <- NEW: per-account MT5 connection pool + creds
++-- trade_executor.py        <- NEW: mt5.order_send/modify/close wrapper
++-- risk_manager.py          <- NEW: drawdown, daily loss, exposure limits
++-- signal_engine.py         <- Existing signal pipeline, XAUUSD-only refactor
+|   +-- mt5_engine.py        <- Keep (fix credentials, remove XM branding)
+|   +-- structure_engine.py  <- Keep (use shared swing detection)
+|   +-- smc_engine.py        <- Keep (use shared swing detection)
+|   +-- session_engine.py    <- Keep
+|   +-- bias_engine.py       <- Keep
+|   +-- indicators.py        <- NEW: shared pip_size, swing_detection, VWAP
++-- ai_engine.py             <- Keep (add timeout)
++-- second_opinion_engine.py <- Keep
++-- news_engine.py           <- Keep (move load_dotenv out)
++-- chart_engine.py          <- Keep
++-- memory_engine.py         <- Keep (wire startup recovery + outcome task)
++-- database.py              <- Keep (add schema for live trade records)
+
+
+================================================================================
+W. RECOMMENDED IMPLEMENTATION ORDER
+================================================================================
+
+1.  Fix MT5 credential loading — config.py + update mt5_engine.MT5_CONFIG
+2.  Fix XAUUSD pip-size bug — main.py _pip_size() -> use mt5_engine
+3.  Add timeout to AI chat call — ai_engine.py asyncio.wait_for(30s)
+4.  Wire restore_bot_state_on_startup() into on_ready()
+5.  Schedule evaluate_past_alerts_outcomes() as 4th background loop
+6.  Add requirements.txt with pinned versions
+7.  Basic unit tests for: signal logic, lot sizing, pip-size, database CRUD,
+    news freeze logic
+8.  XAUUSD-only refactor — narrow WATCHED_PAIRS to ["XAUUSD"]
+9.  MT5 trade execution — trade_executor.py with order_send, position tracking
+10. Risk manager — drawdown, daily loss, spread gate, margin check
+11. Multi-account support — one MT5 connection per registered account
+12. Persistent log files — logging.FileHandler + RotatingFileHandler
+13. Integration tests against MT5 demo terminal
+
+
+================================================================================
+X. REQUIRED TESTS BEFORE DEMO TRADING
+================================================================================
+
+1.  MT5 connects cleanly with credentials loaded from .env on RoboForex MT5 Pro
+2.  get_market_data("XAUUSD") returns valid DataFrame with all indicator columns
+3.  analyze_market_structure("XAUUSD") produces valid action/entry/sl/tp at
+    correct Gold price scale (~$2300-$3400 range, not 1.0xxx)
+4.  calculate_lot_size_micro("XAUUSD", dollar_risk=10, sl_pips=50) returns a
+    valid, non-zero lot
+5.  XAUUSD pip-size is correctly 0.01 (not 0.0001) in all broadcast card
+    calculations after the fix
+6.  is_news_freeze_active() returns True when Finnhub has a current high-impact
+    event
+7.  check_emergency_killswitch() triggered by keyword match, halts scanner loop
+8.  database.init_db() is idempotent (safe to run twice against same DB)
+9.  signal_scanner_loop does not fire signals during active news freeze
+10. _evaluate_signal_status() correctly identifies TP1/TP2/TP3/SL hits
+11. Second opinion returns proceed=False when given an active killswitch context
+12. Private channel creation via /makeaccount completes without error on a real
+    Discord server
+
+
+================================================================================
+Y. REQUIRED TESTS BEFORE LIVE TRADING
+================================================================================
+
+All of Section X, plus:
+
+1.  Full XAUUSD live tick price matches MT5 terminal display (within 1 pip)
+2.  Lot sizing for $100 account at 1% risk with 50-pip SL on XAUUSD
+    produces <= 0.02 lots (verify against RoboForex margin calculator)
+3.  Emergency killswitch IMMEDIATELY halts signal generation within one 10s cycle
+4.  Drawdown protection correctly refuses signal when daily loss limit reached
+    (must be built and tested before live trading)
+5.  Spread gate refuses signals when XAUUSD spread > threshold (must be built)
+6.  MT5 reconnect correctly recovers from terminal restart without losing open
+    positions in DB
+7.  30-minute and 2-hour alert outcomes correctly written to alert_logs
+8.  Balance in database correctly reflects all /logtrade P&L entries
+9.  /deductbalance to zero does not cause divide-by-zero in lot sizing
+10. Bot restart with active signals correctly continues TP/SL tracking
+11. Soak test: run for 24h on demo — verify no memory leaks, no loop failures,
+    no unhandled exceptions in logs
+12. Verify RoboForex symbol name for Gold (may require "XAUUSDm" or similar)
+    before going live
+
+
+================================================================================
+STEP 1 VERDICT
+================================================================================
+
+1. WHAT IS ALREADY USABLE
+   -------------------------
+   - Discord command framework (/makeaccount, /balance, /statement, /logtrade,
+     /addbalance, /deductbalance) — all work as designed
+   - Signal pipeline (analysis-only) — mt5_engine -> bias_engine ->
+     second_opinion_engine chain is architecturally sound and defensively coded
+   - All institutional analysis engines — structure, SMC, session, bias all
+     produce valid outputs with safe fallbacks
+   - AI chat layer — Groq integration with rich market context injection is
+     functional and well-designed
+   - News engine — 3-tier calendar, freeze logic, killswitch, pre/post release
+     alerts are solid
+   - Database schema — well-designed, supports migrations, WAL mode, adequate
+   - Chart rendering — complete, in-memory PNG generation works
+   - Memory/persistence architecture — design is correct; wiring gaps are small
+
+2. WHAT IS BROKEN
+   ---------------
+   - MT5 credential loading — does not exist; bot requires pre-authenticated
+     MT5 terminal
+   - XAUUSD lot-size display on public cards — off by ~100x due to wrong
+     _pip_size() heuristic
+   - AI chat has no timeout — can stall the event loop under Groq latency
+   - restore_bot_state_on_startup() never called — bot always starts blind
+   - evaluate_past_alerts_outcomes() never runs — alert outcomes always NULL
+
+3. WHAT SHOULD BE PRESERVED
+   -------------------------
+   Everything — the overall architecture is well-conceived. All engines should
+   be kept. The defensive import pattern, the safe fallback design, and the
+   layered signal pipeline are all correct foundations.
+
+4. WHAT SHOULD BE REFACTORED
+   --------------------------
+   - _pip_size() in main.py — replace with call to mt5_engine which uses real
+     broker symbol_info
+   - Duplicate pip-size logic — consolidate into one function in mt5_engine.py
+   - Duplicate fractal swing detection — extract to shared utility
+   - calculate_lot_size_standard() — currently identical to micro; needs
+     verification for RoboForex
+   - news_engine.py module-level load_dotenv() — move to main.py
+   - WATCHED_PAIRS — narrow to ["XAUUSD"] for initial deployment
+   - _shutdown() pattern — consider atexit or signal handling instead
+
+5. WHAT MUST BE BUILT
+   -------------------
+   - MT5 credential loading from .env
+   - requirements.txt with pinned dependencies
+   - Timeout on Groq chat API call
+   - Wire restore_bot_state_on_startup() in on_ready()
+   - Schedule evaluate_past_alerts_outcomes() as 4th background task
+   - Any automated tests (none exist)
+   - Persistent log file handler
+   - Spread gate on signal generation
+   - Drawdown/daily-loss protection (before live trading)
+   - RoboForex symbol suffix verification/configuration
+   - Actual trade execution (order_send, position management)
+
+6. WHAT MUST BE TESTED BEFORE PROCEEDING TO STEP 2
+   --------------------------------------------------
+   1. MT5 connects cleanly with credentials loaded from .env on RoboForex
+   2. get_market_data("XAUUSD") returns correct Gold price-scale data
+   3. XAUUSD lot sizing: 1% of $100 at typical SL produces 0.01-0.05 lots
+   4. Signal scanner correctly skips during news freeze
+   5. Killswitch halts scanner within one cycle
+   6. Three background loops run stably for at least 1 hour without crashing
+   7. /makeaccount creates private channel and DB record correctly
+
+================================================================================
+END OF REPORT
+================================================================================
